@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peninsular Malaysia Orchids Quiz</title>
+<style>
+  :root { --bg:#f6f4ee; --fg:#1d2a1f; --card:#fff; --accent:#6b3fa0; --ok:#2e7d32; --bad:#c62828; --muted:#6b7280; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14191a; --fg:#e8ece8; --card:#1f2627; --accent:#b388eb; --ok:#66bb6a; --bad:#ef5350; --muted:#9aa5a6; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:720px; margin:0 auto; padding:16px; }
+  h1 { font-size:1.4rem; margin:8px 0 4px; }
+  .sub { color:var(--muted); font-size:.9rem; margin-bottom:12px; }
+  .card { background:var(--card); border-radius:12px; padding:14px; box-shadow:0 1px 4px rgba(0,0,0,.12); }
+  .photo { width:100%; max-height:60vh; object-fit:contain; background:#000; border-radius:8px; display:block; }
+  .bar { display:flex; justify-content:space-between; font-size:.9rem; margin-bottom:8px; flex-wrap:wrap; gap:6px; }
+  .modes button, .btn { border:1px solid var(--accent); background:transparent; color:var(--accent); padding:8px 14px; border-radius:8px; font-size:1rem; cursor:pointer; }
+  .modes button.on, .btn.primary { background:var(--accent); color:#fff; }
+  input[type=text] { width:100%; padding:10px; margin:6px 0; font-size:1rem; border-radius:8px; border:1px solid var(--muted); background:var(--bg); color:var(--fg); }
+  .opts { display:grid; gap:8px; margin:10px 0; }
+  .opts button { text-align:left; padding:10px; border-radius:8px; border:1px solid var(--muted); background:var(--bg); color:var(--fg); font-size:1rem; cursor:pointer; font-style:italic; }
+  .opts button.ok { border-color:var(--ok); background:rgba(46,125,50,.2); }
+  .opts button.bad { border-color:var(--bad); background:rgba(198,40,40,.2); }
+  .result { margin-top:10px; line-height:1.5; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .small { font-size:.8rem; color:var(--muted); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>🌺 Peninsular Malaysia Orchids Quiz</h1>
+  <div class="sub">Research-grade, openly licensed iNaturalist photos. Name the genus and species.</div>
+
+  <div class="modes row" style="margin:0 0 12px">
+    <button id="mTyping" class="on">Type it (hard)</button>
+    <button id="mChoice">Multiple choice (easy)</button>
+  </div>
+
+  <div class="card">
+    <div class="bar">
+      <span id="score">Score: 0</span>
+      <span id="round">Round 0</span>
+      <span id="streak">Streak: 0</span>
+    </div>
+    <div id="status">Loading orchid photos from iNaturalist…</div>
+    <img id="photo" class="photo" alt="Orchid to identify" hidden>
+    <div id="credit" class="small"></div>
+
+    <div id="typing" hidden>
+      <input type="text" id="genus" placeholder="Genus (e.g. Dendrobium)" autocomplete="off" autocapitalize="off">
+      <input type="text" id="species" placeholder="Species epithet (e.g. crumenatum)" autocomplete="off" autocapitalize="off">
+      <div class="row">
+        <button class="btn primary" id="submit">Submit</button>
+        <button class="btn" id="hint">Hint</button>
+        <button class="btn" id="skip">Skip</button>
+      </div>
+    </div>
+    <div id="choice" hidden>
+      <div class="opts" id="opts"></div>
+      <div class="row"><button class="btn" id="skip2">Skip</button></div>
+    </div>
+
+    <div class="result" id="result"></div>
+    <div class="row"><button class="btn primary" id="next" hidden>Next orchid →</button></div>
+  </div>
+
+  <p class="small">Data &amp; photos © their observers via <a href="https://www.inaturalist.org">iNaturalist</a>. Region is a bounding box around Peninsular Malaysia, so records from nearby southern Thailand or Singapore can occasionally appear.</p>
+</main>
+
+<script>
+const ORCHIDACEAE = 47217;
+// Bounding box: Peninsular Malaysia
+const BBOX = { nelat: 6.75, nelng: 104.6, swlat: 1.2, swlng: 99.6 };
+const LICENSES = "cc0,cc-by,cc-by-nc,cc-by-sa,cc-by-nc-sa";
+
+const $ = id => document.getElementById(id);
+let pool = [], used = new Set(), cur = null, mode = "typing";
+let score = 0, round = 0, streak = 0, answered = false, hintLevel = 0;
+
+async function loadPool() {
+  const params = new URLSearchParams({
+    taxon_id: ORCHIDACEAE, ...BBOX, quality_grade: "research", photos: "true",
+    rank: "species", photo_license: LICENSES, per_page: 100, order_by: "random",
+    locale: "en"
+  });
+  const res = await fetch("https://api.inaturalist.org/v1/observations?" + params);
+  if (!res.ok) throw new Error("iNaturalist API error " + res.status);
+  const data = await res.json();
+  const fresh = data.results.filter(o =>
+    o.taxon && o.taxon.rank === "species" && o.photos && o.photos.length && !used.has(o.id));
+  pool.push(...fresh);
+}
+
+function nameParts(taxon) {
+  const [genus, epithet] = taxon.name.split(" ");
+  return { genus, epithet };
+}
+
+async function nextRound() {
+  answered = false; hintLevel = 0;
+  $("result").innerHTML = ""; $("next").hidden = true;
+  $("genus").value = ""; $("species").value = "";
+  if (pool.length < 5) {
+    try { await loadPool(); } catch (e) { $("status").textContent = "Couldn't reach iNaturalist: " + e.message; return; }
+  }
+  if (!pool.length) { $("status").textContent = "No photos found."; return; }
+  cur = pool.shift(); used.add(cur.id);
+  round++; $("round").textContent = "Round " + round;
+  const ph = cur.photos[0];
+  $("status").textContent = "";
+  $("photo").hidden = false;
+  $("photo").src = ph.url.replace("square", "large");
+  $("credit").textContent = "Photo: " + (ph.attribution || "iNaturalist observer");
+  if (mode === "typing") {
+    $("typing").hidden = false; $("choice").hidden = true; $("genus").focus();
+  } else {
+    $("typing").hidden = true; $("choice").hidden = false; buildChoices();
+  }
+}
+
+function buildChoices() {
+  const correct = cur.taxon;
+  const seen = new Set([correct.name]);
+  const distractors = [];
+  // Prefer same-genus decoys sometimes to make it harder, otherwise random pool species
+  const all = [...pool].sort(() => Math.random() - 0.5);
+  for (const o of all) {
+    if (distractors.length >= 3) break;
+    if (!seen.has(o.taxon.name)) { seen.add(o.taxon.name); distractors.push(o.taxon); }
+  }
+  const options = [correct, ...distractors].sort(() => Math.random() - 0.5);
+  $("opts").innerHTML = "";
+  options.forEach(t => {
+    const b = document.createElement("button");
+    b.textContent = t.name;
+    b.onclick = () => answerChoice(t, b);
+    b.dataset.name = t.name;
+    $("opts").appendChild(b);
+  });
+}
+
+function reveal(genusOK, speciesOK, gaveUp) {
+  const t = cur.taxon, common = t.preferred_common_name ? ` (${t.preferred_common_name})` : "";
+  let pts = (genusOK ? 1 : 0) + (speciesOK ? 1 : 0);
+  if (hintLevel) pts = Math.max(0, pts - hintLevel * 0.5);
+  score += pts;
+  streak = (genusOK && speciesOK) ? streak + 1 : 0;
+  $("score").textContent = "Score: " + score;
+  $("streak").textContent = "Streak: " + streak;
+  const verdict = gaveUp ? '<span class="bad">Skipped.</span>' :
+    (genusOK && speciesOK) ? '<span class="ok">✅ Correct!</span>' :
+    genusOK ? '<span class="ok">Genus right</span>, <span class="bad">species wrong.</span>' :
+    '<span class="bad">❌ Not quite.</span>';
+  $("result").innerHTML = `${verdict} (+${pts})<br>It was <b><i>${t.name}</i></b>${common}.<br>
+    <a href="${cur.uri}" target="_blank" rel="noopener">View observation on iNaturalist ↗</a>
+    · <a href="https://www.inaturalist.org/taxa/${t.id}" target="_blank" rel="noopener">Taxon page ↗</a>`;
+  answered = true; $("next").hidden = false;
+}
+
+function answerTyping(gaveUp) {
+  if (answered) return;
+  const { genus, epithet } = nameParts(cur.taxon);
+  const g = $("genus").value.trim().toLowerCase();
+  const s = $("species").value.trim().toLowerCase();
+  const gOK = !gaveUp && g === genus.toLowerCase();
+  const sOK = !gaveUp && gOK && s === epithet.toLowerCase();
+  reveal(gOK, sOK, gaveUp);
+}
+
+function answerChoice(t, btn) {
+  if (answered) return;
+  const { genus, epithet } = nameParts(cur.taxon);
+  const picked = nameParts(t);
+  const gOK = picked.genus === genus, sOK = t.name === cur.taxon.name;
+  document.querySelectorAll("#opts button").forEach(b => {
+    if (b.dataset.name === cur.taxon.name) b.classList.add("ok");
+  });
+  if (!sOK) btn.classList.add("bad");
+  reveal(gOK, sOK, false);
+}
+
+$("submit").onclick = () => answerTyping(false);
+$("skip").onclick = () => answerTyping(true);
+$("skip2").onclick = () => { if (!answered) { reveal(false, false, true); } };
+$("next").onclick = nextRound;
+$("hint").onclick = () => {
+  if (answered) return;
+  const { genus } = nameParts(cur.taxon);
+  hintLevel++;
+  const t = cur.taxon;
+  $("result").innerHTML = hintLevel === 1
+    ? `Hint: genus starts with <b>${genus[0]}</b> and has ${genus.length} letters. (−0.5 pts)`
+    : `Hint: genus is <b>${genus}</b>. (−1 pt total)`;
+};
+document.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    if (answered) nextRound();
+    else if (mode === "typing") answerTyping(false);
+  }
+});
+
+function setMode(m) {
+  mode = m;
+  $("mTyping").classList.toggle("on", m === "typing");
+  $("mChoice").classList.toggle("on", m === "choice");
+  if (cur && !answered) {
+    $("typing").hidden = m !== "typing"; $("choice").hidden = m !== "choice";
+    if (m === "choice") buildChoices();
+  }
+}
+$("mTyping").onclick = () => setMode("typing");
+$("mChoice").onclick = () => setMode("choice");
+
+nextRound();
+</script>
+</body>
+</html>
